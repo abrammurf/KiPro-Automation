@@ -4,10 +4,12 @@ Customized For: Vineyard Columbus
 
 AJA Ki Pro to Dropbox Automation Script
 Transfers specific .mov files from Ki Pro to Dropbox weekly and wipes the media of all three Ki Pros
+Enhanced with automatic recording functionality and improved Dropbox authentication
 """
 
 import requests
 import dropbox
+from dropbox import DropboxOAuth2FlowNoRedirect
 import os
 import json
 import time
@@ -15,21 +17,16 @@ import logging
 from datetime import datetime
 from pathlib import Path
 import schedule
+from urllib.parse import quote
 
 # Configuration
-KIPRO_IP = "10.3.10.13"  # Only retrives files from Ki Pro 3
-KIPRO_2_IP = ""  # For formatting only
-KIPRO_3_IP = ""  # For formatting only
-DROPBOX_ACCESS_TOKEN = "sl.u.AFwIKLFkTyHoolcjuyM3MrBRqLglhz5UnB15o78CkGeS1Y6AfHaho8TuZh7R-GX7Un9UUVQTdEEuxT8gv-sTIZj0ZY1cWtOJThd2c-qW8cpbtdhwrvgKik2GW8ZQkfVYFwDJCi126-1F9oFCXODoyjfn6yDQSXlgQnuvrUliOajVy3m4dmpTYbrpH5eqC6NMvf2hkVAl5IQHW4-ArxuZinHVMHAMIu8Ne2iKyyrcVC5RGnqpke8esnBUQPBhtK3K-9q2bS92xD1pB_n83Wr6U1DoJeUft8mBMtzmp9suL_x4V3OhbE-PUxncFByYzmiwIozje83iFu-qbdNgba01UGkx9HgCheQMoZrSO62YwMWWJe8uufegh64QR4H14385I59FX3hik1-64aJ7u6S0IULQt_sQhjkpVD2FRDKP46dNXvOSzCt2wi2jFcZrFZyIphSug86K0Nvjqyp2uxWJu7-gFO-RrLZrMmHAAbNnCge19oEdWTL_130GkuDIB1dzrF2GaE_D8w7h7Ud_FxFxDR_c54JPEl8WZZZcfTDZT7KPtqmlXhrejsMYI4KYF_65UHSUlPstUbdIHqUDxHpes0aK6CZixQKn5Mz8_4xOY7mKxHsDSnv1yG7cg2Oko1EtRod9g6w1jw9lLQ5qfffACU2xNbFYJGY80ZGHDWWRIPz7JHA7Gk3FxwVWT_MqAHhlJyLAe5u6Vz8UtUSBgrm6Uux3g9PpuN_7opHoGzctDud6gi8xMWAh8emNUYsjzXYGBFSwJ5ftJEku3QUfsBgmVpF6iMnoTpkm4lZMHw16eFzDCr8q8eiYeK0dWKDXMQUIBeN_Ww-U2n8mkjFVecqM0sbLf6aVevmihVoB8yt-eDQ1wndIqd4AvLzEfTcJRSSzkVrc_9R75pKrgYqFwb1xf785gJAWa76HdaCSkLsrJmHGAjN3wtOyeTDwXwEDcuyMNhV5YO9eV5b_Kw2BPSxHwz63GWJcu10_dnBLW_32KnmUt9vPT1KkbnfrdcqZB0hHJSoF70UAXJwTkQU7TFuUt3xlLrE0XQj3EkXqK-0qRJ39CkRw35eUP9yTdyDTs_ubOndC3B7Ww2iXXswkOxpNTWofS3yEdgscyO4NqAVe8Bdr1j1kInJd29BjtaaKWXlZzvNpfdT5z5_e5Kk5ATuRFP9EBQSSNTuLyllbBfZdL9ObuAUgKz7BfxttFAMPvgckpXBcoKJhNzLYZMTdahfHHx25oXS-wBOhcHvFeKF-5LLKVVApb2o7R3qaLQRnthfesMgd-2wmueUQYJg66EMIiAgayC3F7QLwsW-RlNGMV6gAyENvYJKL3bGwRMU2Cxl56FU"  # Get from Dropbox API
+KIPRO_3_IP = ""  # Only retrieves files from Ki Pro 3
+KIPRO_2_IP = ""  # For formatting/recording only
+KIPRO_1_IP = ""  # For formatting/recording only
 DROPBOX_FOLDER = "/AUTO TEST"  # Dropbox destination folder
 LOCAL_TEMP_DIR = "./temp_downloads"  # Local temporary storage
 LOG_FILE = "kipro_automation.log"
-
-# Files to backup - Add your specific file names here
-FILES_TO_UPLOAD = [
-    "test_file.txt"
-    # Add more specific filenames as needed
-]
+TOKEN_FILE = "dropbox_token.json"  # File to store Dropbox tokens
 
 # Setup logging
 logging.basicConfig(
@@ -41,13 +38,119 @@ logging.basicConfig(
     ]
 )
 
+def save_tokens(access_token, refresh_token=None):
+    """Save Dropbox tokens to file"""
+    tokens = {
+        'access_token': access_token,
+        'refresh_token': refresh_token,
+        'created_at': datetime.now().isoformat()
+    }
+    
+    try:
+        with open(TOKEN_FILE, 'w') as f:
+            json.dump(tokens, f, indent=2)
+        logging.info("Dropbox tokens saved successfully")
+    except Exception as e:
+        logging.error(f"Failed to save tokens: {e}")
+
+def load_tokens():
+    """Load Dropbox tokens from file"""
+    try:
+        if os.path.exists(TOKEN_FILE):
+            with open(TOKEN_FILE, 'r') as f:
+                tokens = json.load(f)
+            logging.info("Dropbox tokens loaded from file")
+            return tokens.get('access_token'), tokens.get('refresh_token')
+    except Exception as e:
+        logging.error(f"Failed to load tokens: {e}")
+    
+    return None, None
+
+def get_dropbox_access_token():
+    """Get Dropbox access token through OAuth flow or from saved file"""
+    # First try to load existing tokens
+    access_token, refresh_token = load_tokens()
+    
+    if access_token:
+        # Test if the token still works
+        try:
+            dbx = dropbox.Dropbox(access_token)
+            dbx.users_get_current_account()
+            logging.info("Using existing Dropbox access token")
+            return access_token
+        except Exception as e:
+            logging.warning(f"Existing token invalid: {e}")
+            # Token is invalid, need to get a new one
+    
+    # Your app's credentials
+    APP_KEY = '4rfvzrcbfo8jx9z'
+    APP_SECRET = 'ay4y7k5ozlhihwv'
+
+    print("\n" + "="*50)
+    print("DROPBOX AUTHENTICATION REQUIRED")
+    print("="*50)
+    print("This is a one-time setup. The token will be saved for future use.")
+    
+    # OAuth flow
+    auth_flow = DropboxOAuth2FlowNoRedirect(APP_KEY, APP_SECRET, token_access_type='offline')
+
+    authorize_url = auth_flow.start()
+    print(f"\n1. Open this URL in your browser:")
+    print(f"   {authorize_url}")
+    print("\n2. Click 'Allow' (you might have to log in first)")
+    print("3. Copy the authorization code from the success page")
+
+    auth_code = input("\nEnter the authorization code here: ").strip()
+
+    try:
+        oauth_result = auth_flow.finish(auth_code)
+        access_token = oauth_result.access_token
+        refresh_token = getattr(oauth_result, 'refresh_token', None)
+        
+        # Save tokens for future use
+        save_tokens(access_token, refresh_token)
+        
+        print("\n✓ Authentication successful! Token saved for future use.")
+        print("="*50)
+        
+        return access_token
+
+    except Exception as e:
+        logging.error(f"Authentication failed: {e}")
+        print(f"\n✗ Authentication failed: {e}")
+        return None
+
+def test_dropbox_connection(access_token):
+    """Test Dropbox connection"""
+    try:
+        dbx = dropbox.Dropbox(access_token)
+        account = dbx.users_get_current_account()
+        logging.info(f"Connected to Dropbox as: {account.name.display_name}")
+        return True
+    except Exception as e:
+        logging.error(f"Dropbox connection test failed: {e}")
+        return False
+
 class KiProAutomation:
     def __init__(self):
-        self.kipro_base_url = f"http://{KIPRO_IP}"
-        self.dbx = dropbox.Dropbox(DROPBOX_ACCESS_TOKEN)
+        self.kipro_base_url = f"http://{KIPRO_3_IP}"
+        
+        # Get Dropbox access token
+        access_token = get_dropbox_access_token()
+        if not access_token:
+            raise ValueError("Failed to obtain Dropbox access token")
+        
+        # Test connection
+        if not test_dropbox_connection(access_token):
+            raise ValueError("Dropbox connection test failed")
+        
+        # Initialize Dropbox client
+        self.dbx = dropbox.Dropbox(access_token)
         self.temp_dir = Path(LOCAL_TEMP_DIR)
         self.temp_dir.mkdir(exist_ok=True)
         
+        logging.info("KiProAutomation initialized successfully")
+    
     def set_kipro_data_mode(self, enable=True):
         """Set Ki Pro to Data-LAN mode for file transfers"""
         mode = 1 if enable else 0  # 1 = Data-LAN, 0 = Record-Play
@@ -63,21 +166,263 @@ class KiProAutomation:
             logging.error(f"Failed to set Ki Pro mode: {e}")
             return False
     
-    def check_file_exists(self, filename):
-        """Check if a specific file exists on the Ki Pro"""
-        check_url = f"{self.kipro_base_url}/media/{filename}"
-        
+    def get_kipro_status(self, kipro_ip):
+        """Get current status of a Ki Pro device"""
+        def _get_json(paramid, timeout=5):
+            url = f"http://{kipro_ip}/config"
+            try:
+                r = requests.get(url, params={"action":"get","paramid":paramid}, timeout=timeout)
+                r.raise_for_status()
+                # Ki Pro returns JSON like: {"paramid":"...","name":"...","value":"...","value_name":""}
+                return r.json().get("value", "").strip()
+            except Exception:
+                return "unknown"
+
         try:
-            response = requests.head(check_url, timeout=10)
+            transport_state = _get_json("eParamID_TransportState")
+            media_state     = _get_json("eParamID_MediaState")
+            clip_name       = _get_json("eParamID_ClipName")
+            return {
+                "transport_state": transport_state,
+                "media_state": media_state,
+                "clip_name": clip_name
+            }
+        except Exception as e:
+            logging.error(f"Failed to get status from Ki Pro {kipro_ip}: {e}")
+            return None
+
+    def start_recording(self, kipro_ip, filename=None):
+        """Start recording on a specific Ki Pro with enhanced error checking"""
+        try:
+            logging.info(f"=== Starting recording on Ki Pro {kipro_ip} ===")
+
+            # Ensure Record-Play (0), not Data-LAN (1)
+            logging.info("Setting Ki Pro to Record-Play mode...")
+            mode_resp = requests.get(
+                f"http://{kipro_ip}/config",
+                params={"action":"set","paramid":"eParamID_MediaState","value":"0"},
+                timeout=10
+            )
+            mode_resp.raise_for_status()
+
+            time.sleep(2)
+
+            # OPTIONAL: set clip name BEFORE recording
+            if filename:
+                safe_name = quote(filename, safe="._-")  # URL-encode; allow common safe chars
+                logging.info(f"Setting recording filename to: {filename}")
+                name_resp = requests.get(
+                    f"http://{kipro_ip}/config",
+                    params={"action":"set","paramid":"eParamID_ClipName","value":safe_name},
+                    timeout=10
+                )
+                name_resp.raise_for_status()
+                time.sleep(0.5)
+
+            # Stop any current transport activity -> Send STOP (4) twice to ensure idle
+            logging.info("Ensuring transport is idle (Stop x2)...")
+            for _ in range(2):
+                stop_resp = requests.get(
+                    f"http://{kipro_ip}/config",
+                    params={"action":"set","paramid":"eParamID_TransportCommand","value":"4"},
+                    timeout=10
+                )
+                stop_resp.raise_for_status()
+                time.sleep(0.5)
+
+            # START RECORDING: Record command = 3  (not 2)
+            logging.info("Sending record command (3)...")
+            rec_resp = requests.get(
+                f"http://{kipro_ip}/config",
+                params={"action":"set","paramid":"eParamID_TransportCommand","value":"3"},
+                timeout=10
+            )
+            rec_resp.raise_for_status()
+
+            # Give the unit a moment and verify
+            time.sleep(2)
+            status = self.get_kipro_status(kipro_ip)
+            if status:
+                logging.info(f"Final status - Transport: {status['transport_state']}, Media: {status['media_state']}")
+                # Some firmware reports numeric or text; accept both
+                if status['transport_state'] in ('3', 'Recording', 'Record'):
+                    logging.info(f"✓ Recording successfully started on Ki Pro {kipro_ip}")
+                    return True
+                # Some units briefly report Play(1) then switch to Record; retry one probe
+                time.sleep(1.5)
+                status = self.get_kipro_status(kipro_ip)
+                if status and status['transport_state'] in ('3', 'Recording', 'Record'):
+                    logging.info(f"✓ Recording successfully started on Ki Pro {kipro_ip}")
+                    return True
+
+            logging.warning(f"Recording may not have started. Transport state: {status and status['transport_state']}")
+            return False
+
+        except requests.exceptions.Timeout as e:
+            logging.error(f"Timeout while starting recording on Ki Pro {kipro_ip}: {e}")
+            return False
+        except requests.exceptions.ConnectionError as e:
+            logging.error(f"Connection error while starting recording on Ki Pro {kipro_ip}: {e}")
+            return False
+        except requests.exceptions.RequestException as e:
+            logging.error(f"Request failed while starting recording on Ki Pro {kipro_ip}: {e}")
+            return False
+        except Exception as e:
+            logging.error(f"Unexpected error while starting recording on Ki Pro {kipro_ip}: {e}")
+            return False
+    
+    def stop_recording(self, kipro_ip):
+        """Stop recording on a specific Ki Pro (Stop=4, send twice to exit pause)"""
+        try:
+            logging.info(f"=== Stopping recording on Ki Pro {kipro_ip} ===")
+
+            # Send STOP (4) twice to ensure we get to idle from pause
+            for i in range(2):
+                stop_resp = requests.get(
+                    f"http://{kipro_ip}/config",
+                    params={"action":"set","paramid":"eParamID_TransportCommand","value":"4"},
+                    timeout=10
+                )
+                stop_resp.raise_for_status()
+                time.sleep(0.6)
+
+            # Verify
+            time.sleep(1.0)
+            status = self.get_kipro_status(kipro_ip)
+            if status:
+                logging.info(f"Final status - Transport: {status['transport_state']}")
+                if status['transport_state'] in ('4', '0', 'Stop', 'Stopped', 'Idle', 'Paused'):
+                    logging.info(f"✓ Recording stopped (or paused) on Ki Pro {kipro_ip}")
+                    return True
+
+            logging.warning(f"Stop may not have completed. Transport state: {status and status['transport_state']}")
+            return False
+
+        except requests.exceptions.Timeout as e:
+            logging.error(f"Timeout while stopping recording on Ki Pro {kipro_ip}: {e}")
+            return False
+        except requests.exceptions.ConnectionError as e:
+            logging.error(f"Connection error while stopping recording on Ki Pro {kipro_ip}: {e}")
+            return False
+        except requests.exceptions.RequestException as e:
+            logging.error(f"Request failed while stopping recording on Ki Pro {kipro_ip}: {e}")
+            return False
+        except Exception as e:
+            logging.error(f"Unexpected error while stopping recording on Ki Pro {kipro_ip}: {e}")
+            return False
+    
+    def test_kipro_connection(self, kipro_ip):
+        """Test connection to a Ki Pro device"""
+        try:
+            test_url = f"http://{kipro_ip}/config?action=get&paramid=eParamID_TransportState"
+            response = requests.get(test_url, timeout=5)
             if response.status_code == 200:
-                logging.info(f"File {filename} exists on Ki Pro")
+                logging.info(f"✓ Ki Pro {kipro_ip} is reachable")
                 return True
             else:
-                logging.info(f"File {filename} not found on Ki Pro (status: {response.status_code})")
+                logging.error(f"✗ Ki Pro {kipro_ip} returned status code: {response.status_code}")
                 return False
         except requests.exceptions.RequestException as e:
-            logging.warning(f"Could not check if {filename} exists: {e}")
+            logging.error(f"✗ Cannot reach Ki Pro {kipro_ip}: {e}")
             return False
+
+    def start_all_recordings(self, time_slot):
+        """Start recording on all Ki Pro devices with appropriate filenames"""
+        logging.info(f"=== Starting {time_slot} recordings on all Ki Pros ===")
+        
+        today = datetime.today()
+        filename = today.strftime("%Y%m%d") + f"_{time_slot}"
+        
+        kipro_ips = [KIPRO_1_IP, KIPRO_2_IP, KIPRO_3_IP]
+        successful_starts = 0
+        
+        # First test all connections
+        logging.info("Testing connections to all Ki Pro devices...")
+        for i, ip in enumerate(kipro_ips, 1):
+            if not self.test_kipro_connection(ip):
+                logging.error(f"Cannot connect to Ki Pro {i} ({ip}) - skipping")
+                continue
+        
+        # Start recordings
+        for i, ip in enumerate(kipro_ips, 1):
+            kipro_filename = f"{filename}_KiPro{i}"
+            logging.info(f"Starting recording on Ki Pro {i} ({ip}) with filename: {kipro_filename}")
+            
+            if self.start_recording(ip, kipro_filename):
+                successful_starts += 1
+                logging.info(f"✓ Ki Pro {i} ({ip}) recording started successfully")
+            else:
+                logging.error(f"✗ Failed to start recording on Ki Pro {i} ({ip})")
+                
+                # Try alternative approach - start without filename first
+                logging.info(f"Attempting fallback approach for Ki Pro {i}...")
+                if self.start_recording(ip, None):
+                    logging.info(f"✓ Ki Pro {i} started recording without custom filename")
+                    successful_starts += 1
+        
+        logging.info(f"Recording start summary: {successful_starts}/{len(kipro_ips)} successful")
+        
+        if successful_starts == 0:
+            logging.error("No recordings started successfully!")
+        elif successful_starts < len(kipro_ips):
+            logging.warning(f"Only {successful_starts} out of {len(kipro_ips)} recordings started")
+        else:
+            logging.info("All recordings started successfully!")
+            
+        return successful_starts > 0  # Return True if at least one recording started
+    
+    def stop_all_recordings(self):
+        """Stop recording on all Ki Pro devices"""
+        logging.info("=== Stopping recordings on all Ki Pros ===")
+        
+        kipro_ips = [KIPRO_1_IP, KIPRO_2_IP, KIPRO_3_IP]
+        successful_stops = 0
+        
+        # First test all connections
+        logging.info("Testing connections to all Ki Pro devices...")
+        for i, ip in enumerate(kipro_ips, 1):
+            if not self.test_kipro_connection(ip):
+                logging.error(f"Cannot connect to Ki Pro {i} ({ip}) - skipping")
+                continue
+        
+        # Stop recordings
+        for i, ip in enumerate(kipro_ips, 1):
+            logging.info(f"Stopping recording on Ki Pro {i} ({ip})")
+            
+            if self.stop_recording(ip):
+                successful_stops += 1
+                logging.info(f"✓ Ki Pro {i} ({ip}) recording stopped successfully")
+            else:
+                logging.error(f"✗ Failed to stop recording on Ki Pro {i} ({ip})")
+        
+        logging.info(f"Recording stop summary: {successful_stops}/{len(kipro_ips)} successful")
+        
+        if successful_stops == 0:
+            logging.error("No recordings stopped successfully!")
+        elif successful_stops < len(kipro_ips):
+            logging.warning(f"Only {successful_stops} out of {len(kipro_ips)} recordings stopped")
+        else:
+            logging.info("All recordings stopped successfully!")
+            
+        return successful_stops > 0  # Return True if at least one recording stopped
+    
+    def check_file_exists(self, filename):
+        """Check if a specific file exists on the Ki Pro"""
+        # Try both with and without .mov extension
+        filenames_to_check = [filename, f"{filename}.mov"]
+        
+        for fname in filenames_to_check:
+            check_url = f"{self.kipro_base_url}/media/{fname}"
+            try:
+                response = requests.head(check_url, timeout=10)
+                if response.status_code == 200:
+                    logging.info(f"File {fname} exists on Ki Pro")
+                    return fname  # Return the actual filename that exists
+            except requests.exceptions.RequestException as e:
+                continue
+        
+        logging.info(f"File {filename} (with or without .mov) not found on Ki Pro")
+        return None
     
     def download_file_from_kipro(self, filename):
         """Download a single file from Ki Pro"""
@@ -97,13 +442,14 @@ class KiProAutomation:
             with open(local_path, 'wb') as f:
                 downloaded = 0
                 for chunk in response.iter_content(chunk_size=8192):
-                    f.write(chunk)
-                    downloaded += len(chunk)
-                    
-                    # Log progress for large files
-                    if total_size > 0 and downloaded % (10*1024*1024) == 0:  # Every 10MB
-                        progress = (downloaded / total_size) * 100
-                        logging.info(f"Download progress: {progress:.1f}%")
+                    if chunk:  # Filter out keep-alive chunks
+                        f.write(chunk)
+                        downloaded += len(chunk)
+                        
+                        # Log progress for large files
+                        if total_size > 0 and downloaded % (10*1024*1024) == 0:  # Every 10MB
+                            progress = (downloaded / total_size) * 100
+                            logging.info(f"Download progress: {progress:.1f}%")
             
             logging.info(f"Downloaded {filename} to {local_path}")
             return local_path
@@ -113,24 +459,36 @@ class KiProAutomation:
             return None
     
     def upload_to_dropbox(self, local_file_path, dropbox_path):
-        """Upload file to Dropbox"""
-        try:
-            with open(local_file_path, 'rb') as f:
-                file_size = os.path.getsize(local_file_path)
-                logging.info(f"Uploading {local_file_path.name} ({file_size / (1024*1024):.1f} MB) to Dropbox...")
-                
-                if file_size <= 150 * 1024 * 1024:  # Files smaller than 150MB
-                    self.dbx.files_upload(f.read(), dropbox_path, mode=dropbox.files.WriteMode.overwrite)
+        """Upload file to Dropbox with retry logic"""
+        max_retries = 3
+        retry_delay = 5
+        
+        for attempt in range(max_retries):
+            try:
+                with open(local_file_path, 'rb') as f:
+                    file_size = os.path.getsize(local_file_path)
+                    logging.info(f"Uploading {local_file_path.name} ({file_size / (1024*1024):.1f} MB) to Dropbox... (Attempt {attempt + 1})")
+                    
+                    if file_size <= 150 * 1024 * 1024:  # Files smaller than 150MB
+                        self.dbx.files_upload(f.read(), dropbox_path, mode=dropbox.files.WriteMode.overwrite)
+                    else:
+                        # Use upload session for large files
+                        f.seek(0)  # Reset file pointer
+                        self._upload_large_file(f, dropbox_path, file_size)
+                    
+                    logging.info(f"✓ Uploaded {local_file_path.name} to Dropbox: {dropbox_path}")
+                    return True
+                    
+            except Exception as e:
+                logging.error(f"Upload attempt {attempt + 1} failed: {e}")
+                if attempt < max_retries - 1:
+                    logging.info(f"Retrying in {retry_delay} seconds...")
+                    time.sleep(retry_delay)
                 else:
-                    # Use upload session for large files
-                    self._upload_large_file(f, dropbox_path, file_size)
-                
-                logging.info(f"Uploaded {local_file_path.name} to Dropbox: {dropbox_path}")
-                return True
-                
-        except Exception as e:
-            logging.error(f"Failed to upload {local_file_path.name} to Dropbox: {e}")
-            return False
+                    logging.error(f"All upload attempts failed for {local_file_path.name}")
+                    return False
+        
+        return False
     
     def _upload_large_file(self, file_obj, dropbox_path, file_size):
         """Upload large files using Dropbox upload session"""
@@ -158,40 +516,42 @@ class KiProAutomation:
     def cleanup_local_files(self):
         """Remove temporary downloaded files"""
         try:
-            for file_path in self.temp_dir.glob("*.mov"):
-                file_path.unlink()
-                logging.info(f"Deleted local file: {file_path}")
+            for file_path in self.temp_dir.iterdir():
+                if file_path.is_file():
+                    file_path.unlink()
+                    logging.info(f"Deleted local file: {file_path}")
         except Exception as e:
             logging.error(f"Error cleaning up local files: {e}")
     
     def format_kipro_media(self):
         """Format/wipe the Ki Pro media"""
-        try:
-            # First set format type to HSF+ (you can change to ExFat by using value=1)
-            format_url = f"{self.kipro_base_url}/config?action=set&paramid=eParamID_FileSystemFormat&value=0"
-            # Also format other Ki Pros
-            format_url_2 = f"{f"http://{KIPRO_2_IP}"}/config?action=set&paramid=eParamID_FileSystemFormat&value=0"
-            format_url_3 = f"{f"http://{KIPRO_3_IP}"}/config?action=set&paramid=eParamID_FileSystemFormat&value=0"
-            response = requests.get(format_url, timeout=10)
-            response = requests.get(format_url_2, timeout=10)
-            response = requests.get(format_url_3, timeout=10)
-
-            response.raise_for_status()
-            
-            # Wait a moment
-            time.sleep(2)
-            
-            # Execute the format command
-            erase_url = f"{self.kipro_base_url}/config?action=set&paramid=eParamID_StorageCommand&value=4"
-            response = requests.get(erase_url, timeout=10)
-            response.raise_for_status()
-            
-            logging.info("Ki Pro media format initiated")
-            return True
-            
-        except requests.exceptions.RequestException as e:
-            logging.error(f"Failed to format Ki Pro media: {e}")
-            return False
+        kipro_ips = [KIPRO_1_IP, KIPRO_2_IP, KIPRO_3_IP]
+        
+        logging.info("=== Starting media format on all Ki Pros ===")
+        
+        for i, ip in enumerate(kipro_ips, 1):
+            try:
+                # First set format type to HSF+ (you can change to ExFat by using value=1)
+                format_url = f"http://{ip}/config?action=set&paramid=eParamID_FileSystemFormat&value=0"
+                response = requests.get(format_url, timeout=10)
+                response.raise_for_status()
+                
+                # Wait a moment
+                time.sleep(2)
+                
+                # Execute the format command
+                erase_url = f"http://{ip}/config?action=set&paramid=eParamID_StorageCommand&value=4"
+                response = requests.get(erase_url, timeout=10)
+                response.raise_for_status()
+                
+                logging.info(f"✓ Ki Pro {i} ({ip}) media format initiated")
+                
+            except requests.exceptions.RequestException as e:
+                logging.error(f"Failed to format Ki Pro {i} media at {ip}: {e}")
+                continue
+        
+        logging.info("=== Media format completed on all Ki Pros ===")
+        return True
     
     def run_weekly_upload(self):
         """Main upload routine - run this weekly"""
@@ -206,13 +566,23 @@ class KiProAutomation:
             time.sleep(5)  # Wait for mode change
             
             # Step 2: Check which files exist and prepare backup list
+            today = datetime.today()
+            files_to_check = [
+                today.strftime("%Y%m%d") + "_9AM",
+                today.strftime("%Y%m%d") + "_11AM"
+            ]
+            
             existing_files = []
-            for filename in FILES_TO_UPLOAD:
-                if self.check_file_exists(filename):
-                    existing_files.append(filename)
+            for filename in files_to_check:
+                actual_filename = self.check_file_exists(filename)
+                if actual_filename:
+                    existing_files.append(actual_filename)
             
             if not existing_files:
                 logging.info("No specified files found to upload")
+                # Still return to Record-Play mode
+                self.set_kipro_data_mode(False)
+                return True
             else:
                 logging.info(f"Found {len(existing_files)} files to upload: {existing_files}")
             
@@ -235,16 +605,14 @@ class KiProAutomation:
             self.cleanup_local_files()
             
             # Step 6: Format Ki Pro media (only if uploads were successful)
-            if successful_uploads == len(existing_files) and existing_files:
+            if successful_uploads == len(existing_files):
                 logging.info("All files uploaded successfully, formatting Ki Pro media...")
                 self.format_kipro_media()
-            elif not existing_files:
-                logging.info("No files to backup, format aborted...")
+                time.sleep(10)  # Wait for format to complete
             else:
-                logging.warning("Some uploads failed, format aborted")
+                logging.warning("Some uploads failed, skipping format")
             
             # Step 7: Return Ki Pro to Record-Play mode
-            time.sleep(10)  # Wait for format to complete
             self.set_kipro_data_mode(False)
             
             logging.info("=== Weekly upload completed ===")
@@ -258,10 +626,23 @@ class KiProAutomation:
 
 def main():
     """Main function to setup scheduling"""
-    automation = KiProAutomation()
+    try:
+        automation = KiProAutomation()
+    except Exception as e:
+        logging.error(f"Failed to initialize automation: {e}")
+        return
     
     # Schedule weekly backup (every Sunday at 2 AM)
-    # schedule.every().sunday.at("02:00").do(automation.run_weekly_upload)
+    schedule.every().sunday.at("02:00").do(automation.run_weekly_upload)
+    
+    # Schedule automatic recordings on Sundays
+    schedule.every().sunday.at("08:55").do(lambda: automation.start_all_recordings("9AM"))
+    schedule.every().sunday.at("10:55").do(lambda: automation.start_all_recordings("11AM"))
+    
+    # Optional: Schedule automatic recording stops (adjust timing as needed)
+    # Assuming 1-hour recordings, stop at 9:55 AM and 11:55 AM
+    schedule.every().sunday.at("09:55").do(automation.stop_all_recordings)
+    schedule.every().sunday.at("11:55").do(automation.stop_all_recordings)
 
     # Alternative scheduling options:
     # schedule.every().monday.at("02:00").do(automation.run_weekly_upload)  # Every Monday
@@ -269,7 +650,8 @@ def main():
     
     logging.info("Ki Pro automation scheduler started")
     logging.info("Weekly upload scheduled for Sundays at 2:00 AM")
-    logging.info(f"Files to upload: {FILES_TO_UPLOAD}")
+    logging.info("Automatic recordings scheduled for Sundays at 8:55 AM and 10:55 AM")
+    logging.info("Automatic recording stops scheduled for Sundays at 9:55 AM and 11:55 AM")
     
     # Keep the script running
     while True:
@@ -277,9 +659,45 @@ def main():
         time.sleep(60)  # Check every minute
 
 if __name__ == "__main__":
-    # For testing, you can run the backup immediately:
-    automation = KiProAutomation()
-    automation.run_weekly_upload()
+    # For testing individual functions:
+    print("Ki Pro Automation Script")
+    print("=" * 50)
     
-    # For production, run the scheduler:
+    try:
+        automation = KiProAutomation()
+        
+        # Test connections to all Ki Pro devices
+        print("\nTesting Ki Pro connections...")
+        kipro_ips = [KIPRO_1_IP, KIPRO_2_IP, KIPRO_3_IP]
+        for i, ip in enumerate(kipro_ips, 1):
+            automation.test_kipro_connection(ip)
+        
+        # Uncomment the functions you want to test:
+        
+        # Test recording start
+        print("\nTesting recording start...")
+        automation.start_all_recordings("TEST")
+        
+        # Test recording stop
+        print("\nTesting recording stop...")
+        automation.stop_all_recordings()
+        
+        # Test individual Ki Pro status
+        # print("\nTesting Ki Pro status...")
+        # for i, ip in enumerate(kipro_ips, 1):
+        #     status = automation.get_kipro_status(ip)
+        #     print(f"Ki Pro {i} ({ip}): {status}")
+        
+        # Test upload
+        # print("\nTesting upload...")
+        # automation.run_weekly_upload()
+        
+        print("\nTest completed. Check the log file for detailed results.")
+        print("To run the scheduler, uncomment the main() call below.")
+        
+    except Exception as e:
+        print(f"Error during testing: {e}")
+        logging.error(f"Error during testing: {e}")
+    
+    # For production, uncomment this line to run the scheduler:
     # main()
